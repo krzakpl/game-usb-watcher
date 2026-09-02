@@ -14,25 +14,15 @@
 
 # ================= KONFIGURACJA =================
 $GameExecutablePath = "C:\Games\Factorio\bin\x64\factorio.exe"  # ZMIEŃ NA SWOJĄ GRĘ
-$TargetUSBDeviceID = "USB\VID_1234&PID_5678"                    # ZMIEŃ NA ID SWOJEGO PENDRIVE'A (zobacz instrukcję poniżej)
+$TargetUSBSerialNumber = "1038CA6E"                              # SERIAL pendrive'a (Device Manager -> Properties -> Details -> Serial Number)
 $FailsafeMinutes = 30                                            # Timeout przed wyłączeniem gry
 $LogFile = "$env:TEMP\game-usb-watcher.log"
-# ==================================================
-# INSTRUKCJA: Aby znaleźć ID pendrive'a, uruchom w PowerShell (jako admin):
-#
-# Get-WmiObject Win32_USBControllerDevice | ForEach-Object { 
-#     $_.Dependent -match 'DeviceID="(.+)"' | Out-Null; 
-#     $matches[1] 
-# } | Get-Unique
-#
-# Lub w Device Manager: Pendrive → Properties → Details → Hardware IDs
 # ==================================================
 
 $global:GameProcess = $null
 $global:GamePID = $null
 $global:IsSuspended = $false
 $global:FailsafeTimer = $null
-$global:USBPresent = $false
 $global:LastUSBState = $false
 
 # P/Invoke do NtSuspendProcess i NtResumeProcess
@@ -70,18 +60,38 @@ function Write-Log {
 
 function Test-USBPresent {
     try {
-        # Szuka urządzenia USB po Device ID w rejestrze
-        $usbDevices = Get-WmiObject Win32_PnPEntity | Where-Object { 
-            $_.DeviceID -like "*$TargetUSBDeviceID*" 
-        }
+        # Szuka urządzenia USB po Serial Number
+        $usbDevices = Get-WmiObject Win32_USBControllerDevice -ErrorAction SilentlyContinue
         
         if ($usbDevices) {
-            # Sprawdzenie czy urządzenie jest dostępne (ConfigManagerErrorCode = 0)
             foreach ($device in $usbDevices) {
-                $pnpDevice = Get-WmiObject Win32_PnPDevice -Filter "DeviceID='$($device.DeviceID)'" -ErrorAction SilentlyContinue
-                if ($pnpDevice -and $pnpDevice.ConfigManagerErrorCode -eq 0) {
-                    return $true
+                $deviceID = $device.Dependent
+                
+                # Wyciągnij Device ID z kwalifikatora
+                if ($deviceID -match 'DeviceID="(.+)"') {
+                    $devID = $matches[1]
+                    
+                    # Szukaj w Device Manager za pomocą PnP entity
+                    $pnpEntity = Get-WmiObject Win32_PnPEntity -Filter "DeviceID='$devID'" -ErrorAction SilentlyContinue
+                    
+                    if ($pnpEntity) {
+                        # Sprawdzenie serial number w nazwie urządzenia lub Description
+                        if ($pnpEntity.Name -like "*$TargetUSBSerialNumber*" -or 
+                            $pnpEntity.Description -like "*$TargetUSBSerialNumber*") {
+                            return $true
+                        }
+                    }
                 }
+            }
+        }
+        
+        # Alternatywna metoda - szukaj w logicznych dysków
+        $volumes = Get-WmiObject Win32_Volume -ErrorAction SilentlyContinue | 
+            Where-Object { $_.DriveType -eq 2 }  # 2 = Removable Media
+        
+        foreach ($vol in $volumes) {
+            if ($vol.Name -like "*$TargetUSBSerialNumber*") {
+                return $true
             }
         }
         
@@ -96,7 +106,7 @@ function Start-Game {
     if (Test-Path $GameExecutablePath) {
         try {
             $dir = Split-Path $GameExecutablePath -Parent
-            $global:GameProcess = Start-Process -FilePath $GameExecutablePath -WorkingDirectory $dir -PassThru
+            $global:GameProcess = Start-Process -FilePath $GameExecutablePath -WorkingDirectory $dir -PassThru -ErrorAction Stop
             $global:GamePID = $global:GameProcess.Id
             $global:IsSuspended = $false
             Write-Log "✓ Gra uruchomiona (PID: $($global:GamePID))"
@@ -226,7 +236,7 @@ function Start-Failsafe {
 
 Write-Log "=== USB Game Watcher uruchomiony ==="
 Write-Log "Gra: $GameExecutablePath"
-Write-Log "USB Device ID: $TargetUSBDeviceID"
+Write-Log "USB Serial: $TargetUSBSerialNumber"
 Write-Log "Failsafe timeout: $FailsafeMinutes minut"
 Write-Log "Log: $LogFile"
 Write-Log ""
@@ -238,47 +248,51 @@ $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -Action {
     if ($global:IsSuspended -and $null -ne $global:GamePID) {
         Resume-Game
     }
-}
+} -ErrorAction SilentlyContinue
 
 # Główna pętla
 while ($true) {
-    $USBNow = Test-USBPresent
-    
-    if ($USBNow -and -not $global:LastUSBState) {
-        # ========== WŁOŻONO PENDRIVE ==========
-        Write-Log "🔌 Pendrive włożony!"
-        $global:LastUSBState = $true
-        Stop-Failsafe
+    try {
+        $USBNow = Test-USBPresent
         
-        if ($null -eq $global:GamePID) {
-            # Gra nie była uruchomiona - start
-            Start-Game
-        } elseif ($global:IsSuspended) {
-            # Gra była zamrożona - resume
-            Resume-Game
-        }
-    }
-    elseif (-not $USBNow -and $global:LastUSBState) {
-        # ========== WYJĘTO PENDRIVE ==========
-        Write-Log "🔌 Pendrive wyjęty!"
-        $global:LastUSBState = $false
-        
-        if ($null -ne $global:GamePID -and -not $global:IsSuspended) {
-            Suspend-Game
-            Start-Failsafe
-        }
-    }
-
-    # Sprawdzenie czy gra się nie padła sama
-    if ($null -ne $global:GamePID) {
-        $proc = Get-Process -Id $global:GamePID -ErrorAction SilentlyContinue
-        if ($null -eq $proc) {
-            Write-Log "⚠ Gra się wyłączyła samodzielnie"
-            $global:GameProcess = $null
-            $global:GamePID = $null
-            $global:IsSuspended = $false
+        if ($USBNow -and -not $global:LastUSBState) {
+            # ========== WŁOŻONO PENDRIVE ==========
+            Write-Log "🔌 Pendrive włożony!"
+            $global:LastUSBState = $true
             Stop-Failsafe
+            
+            if ($null -eq $global:GamePID) {
+                # Gra nie była uruchomiona - start
+                Start-Game
+            } elseif ($global:IsSuspended) {
+                # Gra była zamrożona - resume
+                Resume-Game
+            }
         }
+        elseif (-not $USBNow -and $global:LastUSBState) {
+            # ========== WYJĘTO PENDRIVE ==========
+            Write-Log "🔌 Pendrive wyjęty!"
+            $global:LastUSBState = $false
+            
+            if ($null -ne $global:GamePID -and -not $global:IsSuspended) {
+                Suspend-Game
+                Start-Failsafe
+            }
+        }
+
+        # Sprawdzenie czy gra się nie padła sama
+        if ($null -ne $global:GamePID) {
+            $proc = Get-Process -Id $global:GamePID -ErrorAction SilentlyContinue
+            if ($null -eq $proc) {
+                Write-Log "⚠ Gra się wyłączyła samodzielnie"
+                $global:GameProcess = $null
+                $global:GamePID = $null
+                $global:IsSuspended = $false
+                Stop-Failsafe
+            }
+        }
+    } catch {
+        Write-Log "✗ Błąd w main loop: $_"
     }
 
     Start-Sleep -Milliseconds 500
