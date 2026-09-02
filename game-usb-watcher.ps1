@@ -14,7 +14,7 @@
 
 # ================= KONFIGURACJA =================
 $GameExecutablePath = "C:\Games\Factorio\bin\x64\factorio.exe"  # ZMIEŃ NA SWOJĄ GRĘ
-$TargetUSBSerialNumber = "1038CA6E"                              # SERIAL pendrive'a (Device Manager -> Properties -> Details -> Serial Number)
+$TargetUSBSerialNumber = "1038CA6E"                              # SERIAL pendrive'a
 $FailsafeMinutes = 30                                            # Timeout przed wyłączeniem gry
 $LogFile = "$env:TEMP\game-usb-watcher.log"
 # ==================================================
@@ -25,26 +25,33 @@ $global:IsSuspended = $false
 $global:FailsafeTimer = $null
 $global:LastUSBState = $false
 
-# P/Invoke do NtSuspendProcess i NtResumeProcess
-Add-Type -Name Win32 -Namespace GameUSB -MemberDefinition @'
-    [System.Runtime.InteropServices.DllImport("ntdll.dll")]
-    public static extern int NtSuspendProcess(System.IntPtr processHandle);
+# P/Invoke
+$Win32Source = @"
+using System;
+using System.Runtime.InteropServices;
 
-    [System.Runtime.InteropServices.DllImport("ntdll.dll")]
-    public static extern int NtResumeProcess(System.IntPtr processHandle);
+public class GameUSB {
+    [DllImport("ntdll.dll")]
+    public static extern int NtSuspendProcess(IntPtr processHandle);
 
-    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
-    public static extern System.IntPtr OpenProcess(int access, bool inherit, int pid);
+    [DllImport("ntdll.dll")]
+    public static extern int NtResumeProcess(IntPtr processHandle);
 
-    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
-    public static extern bool CloseHandle(System.IntPtr handle);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern IntPtr OpenProcess(int access, bool inherit, int pid);
 
-    [System.Runtime.InteropServices.DllImport("user32.dll")]
-    public static extern bool ShowWindowAsync(System.IntPtr hWnd, int nCmdShow);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern bool CloseHandle(IntPtr handle);
 
-    [System.Runtime.InteropServices.DllImport("user32.dll")]
-    public static extern bool SetForegroundWindow(System.IntPtr hWnd);
-#>
+    [DllImport("user32.dll")]
+    public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    public static extern bool SetForegroundWindow(IntPtr hWnd);
+}
+"@
+
+Add-Type -TypeDefinition $Win32Source -ErrorAction SilentlyContinue
 
 $PROCESS_SUSPEND_RESUME = 0x0800
 $SW_RESTORE = 9
@@ -135,15 +142,15 @@ function Suspend-Game {
 
     # Schowaj okno
     if ($proc.MainWindowHandle -ne [IntPtr]::Zero) {
-        [GameUSB.Win32]::ShowWindowAsync($proc.MainWindowHandle, $SW_HIDE) | Out-Null
+        [GameUSB]::ShowWindowAsync($proc.MainWindowHandle, $SW_HIDE) | Out-Null
         Start-Sleep -Milliseconds 100
     }
 
     # Zamróź proces
-    $handle = [GameUSB.Win32]::OpenProcess($PROCESS_SUSPEND_RESUME, $false, $global:GamePID)
+    $handle = [GameUSB]::OpenProcess($PROCESS_SUSPEND_RESUME, $false, $global:GamePID)
     if ($handle -ne [IntPtr]::Zero) {
-        [GameUSB.Win32]::NtSuspendProcess($handle) | Out-Null
-        [GameUSB.Win32]::CloseHandle($handle) | Out-Null
+        [GameUSB]::NtSuspendProcess($handle) | Out-Null
+        [GameUSB]::CloseHandle($handle) | Out-Null
         $global:IsSuspended = $true
         Write-Log "❄ Gra zamrożona w RAM (PID: $($global:GamePID))"
     } else {
@@ -165,10 +172,10 @@ function Resume-Game {
     }
 
     # Wznów proces
-    $handle = [GameUSB.Win32]::OpenProcess($PROCESS_SUSPEND_RESUME, $false, $global:GamePID)
+    $handle = [GameUSB]::OpenProcess($PROCESS_SUSPEND_RESUME, $false, $global:GamePID)
     if ($handle -ne [IntPtr]::Zero) {
-        [GameUSB.Win32]::NtResumeProcess($handle) | Out-Null
-        [GameUSB.Win32]::CloseHandle($handle) | Out-Null
+        [GameUSB]::NtResumeProcess($handle) | Out-Null
+        [GameUSB]::CloseHandle($handle) | Out-Null
         $global:IsSuspended = $false
         
         # Czekaj na stabilizację procesu
@@ -186,8 +193,8 @@ function Resume-Game {
 
         # Pokaż okno
         if ($procCheck.MainWindowHandle -ne [IntPtr]::Zero) {
-            [GameUSB.Win32]::ShowWindowAsync($procCheck.MainWindowHandle, $SW_RESTORE) | Out-Null
-            [GameUSB.Win32]::SetForegroundWindow($procCheck.MainWindowHandle) | Out-Null
+            [GameUSB]::ShowWindowAsync($procCheck.MainWindowHandle, $SW_RESTORE) | Out-Null
+            [GameUSB]::SetForegroundWindow($procCheck.MainWindowHandle) | Out-Null
         }
         
         Write-Log "▶ Gra wznowiona (PID: $($global:GamePID))"
